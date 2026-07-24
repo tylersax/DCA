@@ -346,10 +346,14 @@ void Parameters<Concurrency, Threading, Profiler, Model, RandomNumberGenerator, 
                                                             DomainsParameters::get_cluster());
   domains::cluster_domain_symmetry_initializer<
       RClusterDmn, typename Model::lattice_type::DCA_point_group>::execute();
-  // The check runs immediately after the initializer: the derivation temporarily overwrites
-  // this family's symmetry singletons with the pool-derived group and then restores exactly
-  // the state the line above just produced.
-  checkDerivedSymmetry<RClusterDmn>();
+  // Derive-authoritative symmetrization of the DCA cluster: for an in-scope model this discards the
+  // declared group just installed above and replaces it with the group derived from H0 (holohedry
+  // pool -> geometry -> H0 gate), populating that group's (P, U_S, phi) record for the imposition to
+  // orbit-average over. A compile-time no-op for out-of-scope models (3D, no initializeH0, or
+  // no_symmetry = the off switch), which keep the declared group and the legacy path. Only the DCA
+  // cluster is derived; the host/lattice grids below keep the declared group (family coverage is
+  // CLUSTER-only in this milestone).
+  deriveAndPopulateRecord<RClusterDmn, Model>(*this);
 
   if (concurrency_.id() == concurrency_.first())
     KClusterDmn::parameter_type::print(std::cout);

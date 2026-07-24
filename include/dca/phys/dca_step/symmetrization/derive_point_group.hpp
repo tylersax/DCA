@@ -29,6 +29,7 @@
 #include "dca/phys/dca_step/symmetrization/solve_orbital_op_signs.hpp"
 #include "dca/phys/domains/cluster/cluster_symmetry.hpp"
 #include "dca/phys/domains/cluster/symmetries/point_groups/2d/holohedries_2d.hpp"
+#include "dca/phys/domains/cluster/symmetries/point_groups/no_symmetry.hpp"
 #include "dca/phys/domains/cluster/symmetrization_algorithms/search_maximal_symmetry_group.hpp"
 #include "dca/phys/domains/cluster/symmetrization_algorithms/set_symmetry_matrices.hpp"
 #include "dca/phys/domains/quantum/electron_band_domain.hpp"
@@ -193,6 +194,74 @@ std::string deriveAndComparePointGroup(const Parameters& parameters) {
              << "H0-invariance check (or, the lattice is not in the pool's standard orientation): "
              << join(unverified) << ".\n";
     return report.str();
+  }
+}
+
+// Compile-time predicate deciding whether a model uses derive-authoritative symmetrization on its
+// DCA cluster. A model qualifies iff it is 2D, exposes the initializeH0 interface (so H0 can gate
+// the derivation), and does not declare no_symmetry (the honored "off" switch). Everything else --
+// 3D models, legacy lattices without initializeH0, and no_symmetry declarations -- keeps the
+// declared group and the legacy symmetrization path. The gate is consulted both at the parameters
+// seam (which populates the derived record only for qualifying models) and inside the imposition
+// (which routes the DCA cluster of a qualifying model onto the record path); the two must agree, so
+// they share this single trait.
+template <typename Parameters>
+class CanDeriveSymmetry {
+  using Lattice = typename Parameters::lattice_type;
+  using KCluster = typename Parameters::KClusterDmn::parameter_type;
+  using BDmn = func::dmn_0<domains::electron_band_domain>;
+  using SDmn = func::dmn_0<domains::electron_spin_domain>;
+  using NuDmn = func::dmn_variadic<BDmn, SDmn>;
+  using H0Type =
+      func::function<std::complex<double>, func::dmn_variadic<NuDmn, NuDmn, func::dmn_0<KCluster>>>;
+
+public:
+  static constexpr bool value =
+      Lattice::DIMENSION == 2 &&
+      detail::LatticeHasInitializeH0<Lattice, Parameters, H0Type>::value &&
+      !domains::is_no_symmetry<typename Lattice::DCA_point_group>::value;
+};
+
+// Derive-authoritative install + populate for one cluster family. For an in-scope model
+// (CanDeriveSymmetry) this replaces the declared group -- installed by the caller's
+// cluster_domain_symmetry_initializer just before -- with the group derived from H0 alone (the 2D
+// holohedry pool, filtered by geometry, gated by H0 invariance) and populates that group's orbital
+// operations U_S into the record, so the imposition can orbit-average over the derived group. Unlike
+// deriveAndComparePointGroup this does NOT restore the declared state: the derived group stays live.
+// A compile-time no-op for out-of-scope models, which keep their declared group and the legacy path.
+//
+// For every in-scope shipped model the geometric holohedry equals the H0-verified group (the M3
+// audit), so the installed pool IS the derived group and the sign solve populates every op. A model
+// whose H0 breaks a geometric symmetry (geometric group strictly larger than the H0-verified group)
+// would need the pool pruned to the verified ops before solving; that is a documented future
+// extension. Until then such a model fails loudly in solveOrbitalOpSignsFromH0 rather than silently
+// orbit-averaging over an op H0 does not respect.
+template <typename RClusterDmn, typename Model, typename Parameters>
+void deriveAndPopulateRecord(const Parameters& parameters) {
+  using Lattice = typename Model::lattice_type;
+  using RCluster = typename RClusterDmn::parameter_type;
+  using KCluster = typename domains::cluster_symmetry<RCluster>::dual_type;
+  using BDmn = func::dmn_0<domains::electron_band_domain>;
+  using SDmn = func::dmn_0<domains::electron_spin_domain>;
+  using NuDmn = func::dmn_variadic<BDmn, SDmn>;
+  using H0Type =
+      func::function<std::complex<double>, func::dmn_variadic<NuDmn, NuDmn, func::dmn_0<KCluster>>>;
+
+  if constexpr (Lattice::DIMENSION != 2 ||
+                !detail::LatticeHasInitializeH0<Lattice, Parameters, H0Type>::value ||
+                domains::is_no_symmetry<typename Lattice::DCA_point_group>::value) {
+    (void)parameters;
+    return;
+  }
+  else {
+    // Declaration-free: install the geometry-filtered holohedry pool as the live group, ignoring
+    // DCA_point_group entirely, then keep only what H0 verifies via the sign solve.
+    detail::installPointGroup<KCluster, domains::holohedry_pool_2D>();
+
+    H0Type H0;
+    Model::initializeH0(parameters, H0);
+
+    solveOrbitalOpSignsFromH0<KCluster>(H0);
   }
 }
 

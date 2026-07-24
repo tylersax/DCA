@@ -46,6 +46,7 @@
 
 #include "dca/function/domains.hpp"
 #include "dca/function/function.hpp"
+#include "dca/phys/dca_step/symmetrization/derive_point_group.hpp"
 #include "dca/phys/domains/cluster/cluster_definitions.hpp"
 #include "dca/phys/domains/cluster/cluster_domain.hpp"
 #include "dca/phys/domains/cluster/cluster_symmetry.hpp"
@@ -686,30 +687,75 @@ void SymmetrizeSingleParticleFunction<Parameters>::executeCluster(
 
   f_new = Scalar(0.);
 
-  for (int r_ind = 0; r_ind < RDmn::dmn_size(); ++r_ind) {
-    for (int b0 = 0; b0 < BDmn::dmn_size(); ++b0) {
-      for (int b1 = 0; b1 < BDmn::dmn_size(); ++b1) {
-        double norm = 0.;
-        for (int s_ind = 0; s_ind < SymDmn::dmn_size(); ++s_ind) {
-          int R_new_ind = r_symmetry_matrix(r_ind, 0, s_ind).first;
+  const int nb = BDmn::dmn_size();
+  const int n_ops = SymDmn::dmn_size();
 
-          int b0_new = r_symmetry_matrix(r_ind, b0, s_ind).second;
-          int b1_new = r_symmetry_matrix(0, b1, s_ind).second;
+  if constexpr (N == domains::CLUSTER && CanDeriveSymmetry<Parameters>::value) {
+    // Derive-authoritative record path (DCA cluster of an in-scope model). Real space needs its own
+    // formula: the fold is by a superlattice vector -- exact, so there is no folding phase -- and the
+    // site images are band-dependent. The orbit average is
+    //   G'(b0,b1,r) = (1/|G|) sum_S sig(b0) sig(b1) G(pi(b0), pi(b1), rho_S(r,b0) (-) rho_S(0,b1)),
+    // with the sign sig and band image pi read from the signed-permutation U_S (stored on the dual
+    // momentum cluster -- U_S is representation-independent) and the band-dependent site image
+    // rho_S(r,b) = the ".first" of the r-side symmetry table. (-) is cluster subtraction. Uniform
+    // 1/|G| norm; the off-diagonal band pairs the legacy path zeroed out are now symmetrized.
+    using KDual = typename domains::cluster_symmetry<r_cluster_type>::dual_type;
+    const auto& u_s = domains::cluster_symmetry<KDual>::get_orbital_op();
 
-          double sign = Lattice::transformationSignOfR(b0, b1, s_ind);
-          norm += std::abs(sign);
+    for (int r_ind = 0; r_ind < RDmn::dmn_size(); ++r_ind)
+      for (int b0 = 0; b0 < nb; ++b0)
+        for (int b1 = 0; b1 < nb; ++b1) {
+          Scalar acc = Scalar(0.);
+          for (int s = 0; s < n_ops; ++s) {
+            // Image band and sign of b0, b1 from the signed-permutation U_S row (one nonzero entry).
+            int pi0 = -1, pi1 = -1;
+            double sig0 = 0., sig1 = 0.;
+            for (int c = 0; c < nb; ++c) {
+              if (u_s(b0, c, s) != 0.) {
+                pi0 = c;
+                sig0 = u_s(b0, c, s);
+              }
+              if (u_s(b1, c, s) != 0.) {
+                pi1 = c;
+                sig1 = u_s(b1, c, s);
+              }
+            }
+            const int rho_r_b0 = r_symmetry_matrix(r_ind, b0, s).first;
+            const int rho_0_b1 = r_symmetry_matrix(0, b1, s).first;
+            // subtract(i,j) is the cluster index of (r_j - r_i), so this is rho_S(r,b0) (-) rho_S(0,b1).
+            const int r_arg = r_cluster_type::subtract(rho_0_b1, rho_r_b0);
 
-          if (b0 != b1) {
-            R_new_ind = r_ind;
-            b0_new = b0;
-            b1_new = b1;
-            sign = 1;
+            acc += (sig0 * sig1) * f(pi0, pi1, r_arg);
           }
-
-          f_new(b0, b1, r_ind) += sign * f(b0_new, b1_new, R_new_ind);
+          f_new(b0, b1, r_ind) = acc / double(n_ops);
         }
-        assert(std::abs(norm) > 0);
-        f_new(b0, b1, r_ind) /= norm;
+  }
+  else {
+    for (int r_ind = 0; r_ind < RDmn::dmn_size(); ++r_ind) {
+      for (int b0 = 0; b0 < nb; ++b0) {
+        for (int b1 = 0; b1 < nb; ++b1) {
+          double norm = 0.;
+          for (int s_ind = 0; s_ind < n_ops; ++s_ind) {
+            int R_new_ind = r_symmetry_matrix(r_ind, 0, s_ind).first;
+
+            int b0_new = r_symmetry_matrix(r_ind, b0, s_ind).second;
+            int b1_new = r_symmetry_matrix(0, b1, s_ind).second;
+
+            double sign = Lattice::transformationSignOfR(b0, b1, s_ind);
+            norm += std::abs(sign);
+
+            if (b0 != b1) {
+              R_new_ind = r_ind;
+              b0_new = b0;
+              b1_new = b1;
+              sign = 1;
+            }
+
+            f_new(b0, b1, r_ind) += sign * f(b0_new, b1_new, R_new_ind);
+          }
+          assert(std::abs(norm) > 0);
+          f_new(b0, b1, r_ind) /= norm;
+        }
       }
     }
   }
@@ -785,26 +831,57 @@ void SymmetrizeSingleParticleFunction<Parameters>::executeCluster(
 
   f_new = Scalar(0.);
 
-  for (int k_ind = 0; k_ind < k_dmn_t::dmn_size(); ++k_ind) {
-    for (int b0 = 0; b0 < BDmn::dmn_size(); ++b0) {
-      for (int b1 = 0; b1 < BDmn::dmn_size(); ++b1) {
-        double norm = 0.;
-        for (int s_ind = 0; s_ind < sym_super_cell_dmn_t::dmn_size(); ++s_ind) {
-          int k_new = k_symmetry_matrix(k_ind, b0, s_ind).first;  // FIXME: b0 -> b1
+  const int nb = BDmn::dmn_size();
+  const int n_ops = sym_super_cell_dmn_t::dmn_size();
 
-          int b0_new = k_symmetry_matrix(k_ind, b0, s_ind).second;
-          int b1_new = k_symmetry_matrix(k_ind, b1, s_ind).second;
+  if constexpr (N == domains::CLUSTER && CanDeriveSymmetry<Parameters>::value) {
+    // Derive-authoritative record path (DCA cluster of an in-scope model). The record --
+    // mapped_point, the orbital operation U_S, and the folding phase -- is populated over the
+    // H0-derived group. The orbit average is the dressed conjugation
+    //   G'(k) = (1/|G|) sum_S (U_S V) G(mapped(k,S)) (U_S V)^dagger,   V = diag(fold_phase(k,.,S)),
+    // where V re-dresses the intrinsic U_S onto the folded representative mapped(k,S) = S k - G. U_S
+    // and the +/-1 fold phase are real, so no conjugation is needed on the weights. Every op
+    // contributes one unit-modulus weight to every entry, so the norm is the constant group order |G|
+    // -- the legacy per-entry norm/skip corruption is structurally unrepresentable here.
+    const auto& u_s = domains::cluster_symmetry<k_cluster_type>::get_orbital_op();
+    const auto& fold_phase = domains::cluster_symmetry<k_cluster_type>::get_fold_phase();
+    const auto& mapped_point = domains::cluster_symmetry<k_cluster_type>::get_mapped_point();
 
-          double sign = Lattice::transformationSignOfK(b0, b1, s_ind);
-          norm += std::abs(sign);
-
-          clusterSymmetrySpecial<Parameters>(b0, b1, k_ind, k_new, b0_new,
-                                             b1_new, sign);
-
-          f_new(b0, b1, k_ind) += sign * f(b0_new, b1_new, k_new);
+    for (int k_ind = 0; k_ind < k_dmn_t::dmn_size(); ++k_ind)
+      for (int b0 = 0; b0 < nb; ++b0)
+        for (int b1 = 0; b1 < nb; ++b1) {
+          Scalar acc = Scalar(0.);
+          for (int s = 0; s < n_ops; ++s) {
+            const int k_new = mapped_point(k_ind, s);
+            for (int a = 0; a < nb; ++a)
+              for (int b = 0; b < nb; ++b)
+                acc += u_s(b0, a, s) * fold_phase(k_ind, a, s) * f(a, b, k_new) *
+                       fold_phase(k_ind, b, s) * u_s(b1, b, s);
+          }
+          f_new(b0, b1, k_ind) = acc / double(n_ops);
         }
-        assert(std::abs(norm) > 0);
-        f_new(b0, b1, k_ind) /= norm;
+  }
+  else {
+    for (int k_ind = 0; k_ind < k_dmn_t::dmn_size(); ++k_ind) {
+      for (int b0 = 0; b0 < nb; ++b0) {
+        for (int b1 = 0; b1 < nb; ++b1) {
+          double norm = 0.;
+          for (int s_ind = 0; s_ind < n_ops; ++s_ind) {
+            int k_new = k_symmetry_matrix(k_ind, b0, s_ind).first;  // FIXME: b0 -> b1
+
+            int b0_new = k_symmetry_matrix(k_ind, b0, s_ind).second;
+            int b1_new = k_symmetry_matrix(k_ind, b1, s_ind).second;
+
+            double sign = Lattice::transformationSignOfK(b0, b1, s_ind);
+            norm += std::abs(sign);
+
+            clusterSymmetrySpecial<Parameters>(b0, b1, k_ind, k_new, b0_new, b1_new, sign);
+
+            f_new(b0, b1, k_ind) += sign * f(b0_new, b1_new, k_new);
+          }
+          assert(std::abs(norm) > 0);
+          f_new(b0, b1, k_ind) /= norm;
+        }
       }
     }
   }
